@@ -1,7 +1,10 @@
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
 from utils.dataset_generator import generate_synthetic_cybersecurity_data, save_dataset
 from models.clustering import AnomalyDetectionModels, AttackDetectionModels
 from utils.metrics import calculate_metrics, print_metrics, plot_metrics
@@ -9,36 +12,28 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import os
 
-def preprocess_data(df):
-    """
-    Preprocess the data by handling categorical features and scaling numeric features.
-    """
-    # Create a copy of the dataframe
-    df_processed = df.copy()
-    
-    # Drop timestamp and attack_type as they're not needed for modeling
-    df_processed = df_processed.drop(['timestamp', 'attack_type'], axis=1)
-    
-    # Handle categorical features
-    categorical_features = ['src_ip', 'dst_ip', 'src_mac', 'dst_mac', 'protocol', 'tcp_flags']
-    label_encoders = {}
-    
-    for feature in categorical_features:
-        if feature in df_processed.columns:
-            label_encoders[feature] = LabelEncoder()
-            df_processed[feature] = label_encoders[feature].fit_transform(df_processed[feature])
-    
-    # Ensure numeric features are finite
-    numeric_features = df_processed.select_dtypes(include=[np.number]).columns
-    for feature in numeric_features:
-        df_processed[feature] = df_processed[feature].replace([np.inf, -np.inf], np.nan)
-        df_processed[feature] = df_processed[feature].fillna(df_processed[feature].median())
-    
-    # Scale numeric features
-    scaler = StandardScaler()
-    df_processed[numeric_features] = scaler.fit_transform(df_processed[numeric_features])
-    
-    return df_processed.values
+def preprocess_data(train_df, test_df):
+    """Fit preprocessing on training rows only; transform held-out rows."""
+    train = train_df.drop(columns=['timestamp', 'attack_type'], errors='ignore')
+    test = test_df.drop(columns=['timestamp', 'attack_type'], errors='ignore')
+    train = train.replace([np.inf, -np.inf], np.nan)
+    test = test.replace([np.inf, -np.inf], np.nan)
+    categorical = [c for c in train.columns if c in
+                   ['src_ip', 'dst_ip', 'src_mac', 'dst_mac', 'protocol', 'tcp_flags']
+                   or not pd.api.types.is_numeric_dtype(train[c])]
+    numeric = [c for c in train.columns if c not in categorical]
+    transformer = ColumnTransformer([
+        ('numeric', Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler())
+        ]), numeric),
+        ('categorical', Pipeline([
+            ('imputer', SimpleImputer(strategy='most_frequent')),
+            ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+        ]), categorical)
+    ])
+    return transformer.fit_transform(train), transformer.transform(test)
+
 
 def analyze_attack_types(df):
     """
@@ -229,11 +224,12 @@ def main():
     analyze_attack_types(df)
     
     # Prepare data for modeling
-    X = preprocess_data(df)
     y = (df['attack_type'] != 'normal').astype(int).values
     
     # Split data
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    train_df, test_df, y_train, y_test = train_test_split(
+        df, y, test_size=0.2, random_state=42, stratify=y)
+    X_train, X_test = preprocess_data(train_df, test_df)
     
     # Evaluate models
     results = evaluate_models(X_train, y_train, X_test, y_test)
